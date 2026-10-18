@@ -1,0 +1,318 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Frigo di casa</title>
+<meta name="theme-color" content="#1F6F7F" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#15292D" media="(prefers-color-scheme: dark)">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,600;12..96,800&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#E6F0EF; --surface:#FFFFFF; --surface2:#F2F7F7; --ink:#12343B; --muted:#5A777D;
+  --line:#CFDFDE; --accent:#1F6F7F; --accent-ink:#FFFFFF;
+  --fresh:#2F7D4F; --fresh-bg:#DDF0E3; --soon:#9A6A00; --soon-bg:#FCEFC7; --bad:#B5322B; --bad-bg:#F9DEDB;
+  color-scheme:light; box-sizing:border-box;
+  padding-top:env(safe-area-inset-top,0px); padding-bottom:env(safe-area-inset-bottom,0px);
+}
+@media (prefers-color-scheme:dark){
+  :root{
+    --bg:#0E1D20; --surface:#15292D; --surface2:#1B3338; --ink:#E1EEEE; --muted:#93AEB2;
+    --line:#2A464B; --accent:#5FB8C8; --accent-ink:#0E1D20;
+    --fresh:#7CD39B; --fresh-bg:#1C3A29; --soon:#F2C860; --soon-bg:#3D3115; --bad:#F2877F; --bad-bg:#45201D;
+    color-scheme:dark;
+  }
+}
+*,*::before,*::after{box-sizing:inherit}
+html{height:100%}
+body{margin:0;min-height:100%;background:var(--bg);color:var(--ink);
+  font-family:"Bricolage Grotesque",ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  font-size:16px;line-height:1.45;-webkit-tap-highlight-color:transparent}
+button,input,select{font:inherit;color:inherit}
+[hidden]{display:none !important}
+.wrap{max-width:640px;margin:0 auto;padding:20px 16px 110px}
+.screen-center{max-width:440px;margin:0 auto;padding:48px 20px}
+h1{font-size:clamp(2rem,7vw,2.8rem);font-weight:800;letter-spacing:-.03em;line-height:1;margin:8px 0 4px}
+.lead{margin:0;color:var(--muted)}
+header.top{display:flex;align-items:flex-start;gap:12px}
+header.top .grow{flex:1;min-width:0}
+.icon-btn{border:0;background:var(--surface);border-radius:14px;width:46px;height:46px;cursor:pointer;display:grid;place-items:center;margin-top:8px;flex:none}
+.icon-btn svg{width:22px;height:22px}
+.card{background:var(--surface);border-radius:18px;padding:18px;margin-top:16px;display:grid;gap:12px}
+.card h2{margin:0;font-size:1.15rem}
+.or{text-align:center;color:var(--muted);margin:14px 0 0;font-size:.9rem}
+.notice{margin:16px 0;padding:12px 14px;border-radius:12px;background:var(--surface2);color:var(--muted);font-size:.95rem}
+.err{color:var(--bad);font-size:.92rem;margin:0}
+.alerts{margin:18px 0 6px;border-radius:18px;padding:14px 16px;background:var(--soon-bg)}
+.alerts.bad{background:var(--bad-bg)}
+.alerts h2{margin:0 0 6px;font-size:1.05rem;font-weight:600}
+.alerts ul{margin:0;padding:0;list-style:none;display:flex;flex-wrap:wrap;gap:6px}
+.alerts li{background:var(--surface);border-radius:999px;padding:3px 10px;font-size:.9rem}
+nav.tabs{position:fixed;left:0;right:0;bottom:0;background:var(--surface);border-top:1px solid var(--line);
+  padding:8px 8px calc(8px + env(safe-area-inset-bottom,0px));display:flex;justify-content:center;gap:6px;z-index:5}
+nav.tabs button{flex:1;max-width:200px;border:0;background:none;padding:10px 6px;border-radius:12px;font-weight:600;color:var(--muted);cursor:pointer}
+nav.tabs button[aria-selected="true"]{background:var(--surface2);color:var(--ink)}
+.count{display:inline-block;min-width:1.4em;margin-left:4px;padding:0 5px;border-radius:999px;background:var(--bad);color:#fff;font-size:.75rem;line-height:1.4em}
+.count.info{background:var(--accent);color:var(--accent-ink)}
+.bar{display:flex;gap:8px;align-items:center;margin:18px 0 12px;flex-wrap:wrap}
+.seg{display:flex;background:var(--surface2);border-radius:12px;padding:3px;overflow-x:auto}
+.seg button{border:0;background:none;padding:6px 12px;border-radius:9px;cursor:pointer;color:var(--muted);white-space:nowrap}
+.seg button[aria-pressed="true"]{background:var(--surface);color:var(--ink);font-weight:600}
+.grow{flex:1}
+.btn{border:0;border-radius:12px;padding:11px 16px;font-weight:600;cursor:pointer;background:var(--accent);color:var(--accent-ink);text-align:center}
+.btn.ghost{background:var(--surface2);color:var(--ink)}
+.btn.small{padding:6px 10px;font-size:.88rem;border-radius:10px}
+.btn.wide{width:100%}
+.btn:disabled{opacity:.5;cursor:default}
+.btn.google{display:flex;align-items:center;justify-content:center;gap:10px;background:var(--surface2);color:var(--ink)}
+:focus-visible{outline:3px solid var(--accent);outline-offset:2px}
+.list{list-style:none;margin:0;padding:0}
+.item{display:grid;grid-template-columns:6px 1fr;gap:12px;align-items:center;background:var(--surface);border-radius:14px;padding:12px 12px 12px 0;margin-bottom:8px;overflow:hidden}
+.item .stripe{align-self:stretch;border-radius:0 4px 4px 0;background:var(--fresh)}
+.item.soon .stripe{background:var(--soon)} .item.bad .stripe{background:var(--bad)} .item.none .stripe{background:var(--line)}
+.item .name{font-weight:600;font-size:1.05rem}
+.meta{color:var(--muted);font-size:.85rem}
+.pill{display:inline-block;border-radius:999px;padding:2px 9px;font-size:.82rem;font-weight:600;background:var(--fresh-bg);color:var(--fresh);white-space:nowrap}
+.soon .pill{background:var(--soon-bg);color:var(--soon)} .bad .pill{background:var(--bad-bg);color:var(--bad)} .none .pill{background:var(--surface2);color:var(--muted)}
+.actions{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
+.empty{text-align:center;color:var(--muted);padding:40px 16px}
+.empty strong{display:block;color:var(--ink);font-size:1.15rem;margin-bottom:4px}
+.quickadd{display:flex;gap:8px;margin:18px 0 12px}
+.quickadd input{flex:1;min-width:0}
+input[type=text],input[type=email],input[type=password],input[type=date],input[type=number],select{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:11px 12px;width:100%}
+.card input,.card select,dialog input,dialog select{background:var(--surface2)}
+.shop{display:flex;align-items:center;gap:12px;background:var(--surface);border-radius:14px;padding:10px 12px;margin-bottom:8px}
+.shop input[type=checkbox]{width:24px;height:24px;accent-color:var(--accent);flex:none}
+.shop .txt{flex:1;min-width:0}
+.shop.done .name{text-decoration:line-through;color:var(--muted)}
+.h3{font-size:.95rem;color:var(--muted);font-weight:600;margin:20px 0 8px}
+.recipe{background:var(--surface);border-radius:16px;padding:16px;margin-bottom:12px}
+.recipe h3{margin:0 0 4px;font-size:1.2rem}
+.recipe ol{margin:8px 0 0;padding-left:1.2em}
+.chips{display:flex;flex-wrap:wrap;gap:6px;margin:6px 0}
+.chip{border-radius:999px;padding:2px 9px;font-size:.84rem;background:var(--fresh-bg);color:var(--fresh)}
+.chip.miss{background:var(--surface2);color:var(--muted)} .chip.urgent{background:var(--soon-bg);color:var(--soon)}
+dialog{border:0;border-radius:20px;padding:0;width:min(520px,calc(100% - 24px));max-height:calc(100% - 24px);background:var(--surface);color:var(--ink)}
+dialog::backdrop{background:rgba(8,20,22,.5)}
+dialog form,dialog .body{padding:20px;display:grid;gap:12px}
+dialog h2{margin:0;font-size:1.3rem}
+label{display:grid;gap:4px;font-size:.9rem;color:var(--muted)}
+.row{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.quick{display:flex;gap:6px;flex-wrap:wrap}
+.foot{display:flex;gap:8px;justify-content:flex-end;margin-top:4px}
+.code{font-size:1.6rem;font-weight:800;letter-spacing:.08em;background:var(--surface2);border-radius:12px;padding:10px 14px;text-align:center;user-select:all}
+.set-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.set-row input[type=number]{width:80px}
+hr{border:0;border-top:1px solid var(--line);margin:4px 0}
+.toast{position:fixed;left:50%;bottom:calc(84px + env(safe-area-inset-bottom,0px));transform:translateX(-50%);background:var(--ink);color:var(--bg);padding:10px 16px;border-radius:12px;font-size:.93rem;z-index:20;max-width:calc(100% - 32px);text-align:center}
+.offline{background:var(--soon-bg);color:var(--ink);text-align:center;font-size:.88rem;padding:6px 12px;border-radius:10px;margin-top:12px}
+</style>
+</head>
+<body>
+
+<!-- Configurazione mancante -->
+<div class="screen-center" id="scrSetup" hidden>
+  <h1>Frigo di casa</h1>
+  <p class="lead">Manca la configurazione di Firebase. Apri il file <b>config.js</b> e incolla i valori come spiegato nella guida (passi 2 e 5).</p>
+</div>
+
+<!-- Caricamento -->
+<div class="screen-center" id="scrLoading">
+  <h1>Frigo di casa</h1>
+  <p class="lead">Caricamento…</p>
+</div>
+
+<!-- Accesso -->
+<div class="screen-center" id="scrLogin" hidden>
+  <h1>Frigo di casa</h1>
+  <p class="lead">Frigo, dispensa e spesa condivisi con la famiglia. Accedi per iniziare.</p>
+  <div class="card">
+    <button class="btn google wide" id="googleBtn">
+      <svg width="18" height="18" viewBox="0 0 48 48" aria-hidden="true"><path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3C33.7 32.7 29.2 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20 20-8.9 20-20c0-1.3-.1-2.4-.4-3.5z"/><path fill="#FF3D00" d="m6.3 14.7 6.6 4.8C14.7 15.1 19 12 24 12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 16.3 4 9.7 8.3 6.3 14.7z"/><path fill="#4CAF50" d="M24 44c5.2 0 9.9-2 13.4-5.2l-6.2-5.2C29.2 35.1 26.7 36 24 36c-5.2 0-9.6-3.3-11.3-8l-6.5 5C9.5 39.6 16.2 44 24 44z"/><path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3c-.8 2.2-2.2 4.2-4.1 5.6l6.2 5.2C37 39.2 44 34 44 24c0-1.3-.1-2.4-.4-3.5z"/></svg>
+      Accedi con Google
+    </button>
+    <p class="or">oppure con email</p>
+    <form id="emailForm" style="display:grid;gap:10px">
+      <input type="email" name="email" placeholder="Email" autocomplete="email" required aria-label="Email">
+      <input type="password" name="password" placeholder="Password (almeno 6 caratteri)" autocomplete="current-password" required minlength="6" aria-label="Password">
+      <div class="row">
+        <button class="btn" type="submit" data-mode="in">Entra</button>
+        <button class="btn ghost" type="submit" data-mode="up">Crea account</button>
+      </div>
+    </form>
+    <p class="err" id="loginErr" hidden></p>
+  </div>
+</div>
+
+<!-- Scelta famiglia -->
+<div class="screen-center" id="scrHome" hidden>
+  <h1>Ciao!</h1>
+  <p class="lead">Crea la famiglia, oppure entra in quella che ha già creato qualcun altro con il suo codice invito.</p>
+  <div class="card">
+    <label>Come ti chiami?<input type="text" id="myName" autocomplete="given-name" placeholder="es. Andrea"></label>
+  </div>
+  <form class="card" id="joinForm">
+    <h2>Ho un codice invito</h2>
+    <input type="text" id="joinCode" placeholder="es. K7P2QX9MRA" autocomplete="off" autocapitalize="characters" aria-label="Codice invito">
+    <button class="btn" type="submit">Entra nella famiglia</button>
+  </form>
+  <form class="card" id="createForm">
+    <h2>Crea una nuova famiglia</h2>
+    <input type="text" id="houseNameIn" placeholder="es. Casa Rossi" aria-label="Nome della famiglia">
+    <button class="btn ghost" type="submit">Crea la famiglia</button>
+  </form>
+  <p class="err" id="homeErr" hidden></p>
+  <p style="text-align:center;margin-top:20px"><button class="btn ghost small" id="logoutHome">Esci</button></p>
+</div>
+
+<!-- App -->
+<div id="scrApp" hidden>
+  <div class="wrap">
+    <header class="top">
+      <div class="grow">
+        <h1 id="houseName">Frigo di casa</h1>
+        <p class="lead" id="summary"></p>
+      </div>
+      <button class="icon-btn" id="settingsBtn" aria-label="Impostazioni">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+      </button>
+    </header>
+    <div class="offline" id="offline" hidden>Sei offline: le modifiche si sincronizzano appena torni in rete.</div>
+    <div class="notice" id="notifHint" hidden></div>
+
+    <div class="alerts" id="alerts" hidden>
+      <h2 id="alertsTitle"></h2>
+      <ul id="alertsList"></ul>
+    </div>
+
+    <section id="tab-frigo">
+      <div class="bar">
+        <div class="seg" id="locFilter" role="group" aria-label="Filtra per posizione">
+          <button data-loc="all" aria-pressed="true">Tutto</button>
+          <button data-loc="frigo" aria-pressed="false">Frigo</button>
+          <button data-loc="freezer" aria-pressed="false">Freezer</button>
+          <button data-loc="dispensa" aria-pressed="false">Dispensa</button>
+        </div>
+        <span class="grow"></span>
+        <button class="btn" id="addFridgeBtn">Aggiungi</button>
+      </div>
+      <ul class="list" id="fridgeList"></ul>
+    </section>
+
+    <section id="tab-spesa" hidden>
+      <form class="quickadd" id="shopForm">
+        <input type="text" id="shopName" placeholder="Cosa serve? es. latte, 6 uova" autocomplete="off" aria-label="Articolo da comprare">
+        <button class="btn" type="submit">Aggiungi</button>
+      </form>
+      <ul class="list" id="shopList"></ul>
+      <div class="h3" id="doneTitle" hidden>Già nel carrello</div>
+      <ul class="list" id="doneList"></ul>
+      <div class="bar" id="doneBar" hidden>
+        <span class="grow"></span>
+        <button class="btn ghost small" id="clearDone">Togli i comprati dalla lista</button>
+      </div>
+    </section>
+
+    <section id="tab-ricette" hidden>
+      <p class="lead" style="margin-top:18px">Idee per cucinare con quello che c’è, partendo da ciò che scade prima.</p>
+      <div id="noKey" class="notice" hidden>
+        Per i suggerimenti serve una chiave API di Anthropic, salvata solo su questo telefono.
+        <div style="margin-top:10px"><button class="btn small" id="openKeySettings">Inserisci la chiave</button></div>
+      </div>
+      <div class="bar" id="recipeBar">
+        <select id="mealType" aria-label="Tipo di pasto" style="width:auto">
+          <option value="pranzo o cena">Pranzo o cena</option>
+          <option value="colazione">Colazione</option>
+          <option value="piatto veloce sotto i 20 minuti">Veloce (20 min)</option>
+          <option value="piatto per bambini">Per bambini</option>
+          <option value="vegetariano">Vegetariano</option>
+        </select>
+        <button class="btn" id="suggestBtn">Suggerisci ricette</button>
+        <button class="btn ghost" id="stopBtn" hidden>Ferma</button>
+      </div>
+      <div id="recipeStatus" class="notice" hidden></div>
+      <div id="recipes"></div>
+    </section>
+  </div>
+
+  <nav class="tabs" role="tablist">
+    <button role="tab" data-tab="frigo" aria-selected="true">Frigo<span class="count" id="badgeFrigo" hidden></span></button>
+    <button role="tab" data-tab="spesa" aria-selected="false">Spesa<span class="count info" id="badgeSpesa" hidden></span></button>
+    <button role="tab" data-tab="ricette" aria-selected="false">Ricette</button>
+  </nav>
+</div>
+
+<!-- Aggiungi / modifica alimento -->
+<dialog id="fridgeDialog">
+  <form id="fridgeForm">
+    <h2 id="fridgeDialogTitle">Aggiungi alimento</h2>
+    <label>Alimento<input type="text" name="name" required autocomplete="off" placeholder="es. Mozzarella"></label>
+    <div class="row">
+      <label>Quantità<input type="text" name="qty" placeholder="es. 2 pz, 500 g"></label>
+      <label>Dove<select name="location">
+        <option value="frigo">Frigo</option><option value="freezer">Freezer</option><option value="dispensa">Dispensa</option>
+      </select></label>
+    </div>
+    <div class="row">
+      <label>Entrato il<input type="date" name="addedAt" required></label>
+      <label>Scade il<input type="date" name="expiresAt"></label>
+    </div>
+    <div class="quick" aria-label="Scadenza rapida">
+      <button type="button" class="btn ghost small" data-plus="2">+2 giorni</button>
+      <button type="button" class="btn ghost small" data-plus="5">+5 giorni</button>
+      <button type="button" class="btn ghost small" data-plus="14">+2 settimane</button>
+      <button type="button" class="btn ghost small" data-plus="90">+3 mesi</button>
+    </div>
+    <div class="foot">
+      <button type="button" class="btn ghost" id="cancelFridge">Annulla</button>
+      <button type="submit" class="btn" id="saveFridge">Salva</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- Impostazioni -->
+<dialog id="settingsDialog">
+  <div class="body">
+    <h2>Impostazioni</h2>
+    <div>
+      <div class="meta" style="margin-bottom:6px">Codice invito: chi lo inserisce entra nella tua famiglia</div>
+      <div class="code" id="inviteCode"></div>
+      <div class="set-row" style="margin-top:8px">
+        <button class="btn ghost small" id="shareCode">Condividi codice</button>
+        <span class="meta" id="membersLine"></span>
+      </div>
+    </div>
+    <hr>
+    <div class="set-row">
+      Avvisa quando mancano
+      <input type="number" id="alertDays" min="0" max="30" value="3" aria-label="Giorni di preavviso">
+      giorni alla scadenza
+    </div>
+    <div>
+      <button class="btn wide" id="notifBtn">Attiva notifiche su questo telefono</button>
+      <div class="meta" id="notifStatus" style="margin-top:6px"></div>
+    </div>
+    <hr>
+    <label>Chiave API Anthropic per le ricette (facoltativa, resta su questo telefono)
+      <input type="password" id="apiKey" placeholder="sk-ant-…" autocomplete="off">
+    </label>
+    <hr>
+    <div class="foot">
+      <button class="btn ghost" id="logoutBtn">Esci</button>
+      <span class="grow"></span>
+      <button class="btn" id="closeSettings">Fatto</button>
+    </div>
+  </div>
+</dialog>
+
+<div class="toast" id="toast" role="status" hidden></div>
+
+<script src="config.js"></script>
+<script type="module" src="app.js"></script>
+</body>
+</html>
