@@ -3,12 +3,12 @@ importScripts("https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js
 importScripts("https://www.gstatic.com/firebasejs/10.12.2/firebase-messaging-compat.js");
 importScripts("./config.js");
 
-const VERSION = "frigo-v1";
-const SHELL = ["./", "./index.html", "./app.js", "./config.js", "./manifest.webmanifest",
+const VERSION = "frigo-v2";
+const SHELL = ["./", "./index.html", "./app.js", "./config.js", "./catalogo.js", "./manifest.webmanifest",
   "./icons/icon-192.png", "./icons/icon-512.png", "./icons/badge-96.png"];
 
 self.addEventListener("install", e => {
-  e.waitUntil(caches.open(VERSION).then(c => c.addAll(SHELL)).then(() => self.skipWaiting()));
+  e.waitUntil(caches.open(VERSION).then(c => c.addAll(SHELL.map(u => new Request(u, { cache: "reload" })))).then(() => self.skipWaiting()));
 });
 self.addEventListener("activate", e => {
   e.waitUntil(caches.keys()
