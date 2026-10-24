@@ -155,6 +155,29 @@ input[type=text],input[type=search],input[type=email],input[type=password],input
 .tile-btn .t{font-size:.86rem;line-height:1.15;overflow-wrap:anywhere}
 .tile-btn.new{background:var(--accent-soft)}
 .tile-btn .badge{position:absolute;top:4px;right:6px;font-size:.75rem;font-weight:800;color:var(--accent-ink);background:var(--accent);border-radius:99px;padding:0 6px}
+.grid.cats{grid-template-columns:repeat(2,1fr);gap:10px}
+.cat-tile{border:0;background:var(--surface);border-radius:18px;padding:14px 12px;display:flex;align-items:center;gap:10px;cursor:pointer;min-height:84px;text-align:left}
+.cat-tile .e{font-size:2.1rem;line-height:1}
+.cat-tile .t{display:grid;gap:2px;min-width:0}
+.cat-tile .t b{font-size:.98rem;line-height:1.15;overflow-wrap:break-word;hyphens:auto}
+.grid.small{grid-template-columns:repeat(4,1fr);gap:6px}
+.grid.small .tile-btn{min-height:70px;padding:7px 3px;border-radius:12px;gap:2px}
+.grid.small .tile-btn .e{font-size:1.45rem}
+.grid.small .tile-btn .t{font-size:.74rem;line-height:1.1}
+.level-head{display:flex;align-items:center;gap:10px;margin:0 0 10px;font-weight:700;font-size:1.1rem}
+.mrow{display:flex;align-items:center;gap:6px;background:var(--surface);border-radius:14px;padding:6px;margin-bottom:6px;width:100%}
+.mrow .x{width:38px;height:38px;font-size:1rem}
+.mrow .x:disabled{opacity:.3}
+.mmain{flex:1;min-width:0;border:0;background:none;display:flex;align-items:center;gap:10px;padding:6px;cursor:pointer;text-align:left}
+.mrow .e,.mbtn .e{font-size:1.5rem;width:1.5em;text-align:center;flex:none}
+.mbtn{border:0;cursor:pointer;text-align:left;padding:10px}
+.mbtn .grow{min-width:0}
+.mrow.dim{opacity:.55}
+.emoji-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(42px,1fr));gap:4px;max-height:220px;overflow-y:auto;background:var(--surface2);border-radius:12px;padding:6px}
+.em-btn{border:0;background:none;font-size:1.45rem;height:42px;border-radius:10px;cursor:pointer}
+.em-btn[aria-pressed="true"]{background:var(--accent-soft);outline:2px solid var(--accent)}
+.em-big{border:0;background:var(--surface2);border-radius:14px;width:56px;height:56px;font-size:2rem;cursor:pointer;flex:none}
+dialog.small{max-height:calc(100% - 24px);overflow-y:auto}
 .block{background:var(--surface);border-radius:16px;padding:14px;margin-bottom:10px}
 .block .lbl{font-size:.86rem;color:var(--muted);margin-bottom:8px;display:flex;align-items:center;gap:8px}
 .opts{display:flex;gap:6px;flex-wrap:wrap}
@@ -351,6 +374,8 @@ label{display:grid;gap:4px;font-size:.9rem;color:var(--muted)}
       <div class="code" id="inviteCode"></div>
       <div class="set-row" style="margin-top:8px"><button class="btn ghost small" id="shareCode">Condividi codice</button></div>
     </div>
+    <hr>
+    <button class="btn soft wide" id="catalogBtn">📚 Gestisci catalogo: categorie e prodotti</button>
     <hr>
     <div>
       <div class="muted small" style="margin-bottom:6px">Persone in famiglia, per «chi ha mangiato»</div>

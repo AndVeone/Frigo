@@ -1,3 +1,8 @@
+// =====================================================
+//  Frigo di casa — regole Firestore per la versione V3
+//  NOTA: «rules_version = '2'» qui sotto è la versione del
+//  linguaggio di Firebase, NON dell'app: non va mai cambiata.
+// =====================================================
 rules_version = '2';
 // Regole di sicurezza: solo i membri di una famiglia vedono e modificano i suoi dati.
 // Per entrare in una famiglia serve il suo codice invito (l'id del documento).
@@ -30,9 +35,9 @@ service cloud.firestore {
             && request.auth.uid in request.resource.data.members);
       allow delete: if false;
 
-      // Casa, spesa, catalogo della famiglia, storico movimenti e pasti
+      // Casa, spesa, catalogo e categorie della famiglia, storico movimenti e pasti
       match /{list}/{itemId} {
-        allow read, write: if list in ['fridge', 'shopping', 'catalog', 'events', 'meals'] && isMember(hid);
+        allow read, write: if list in ['fridge', 'shopping', 'catalog', 'categories', 'events', 'meals'] && isMember(hid);
       }
     }
   }

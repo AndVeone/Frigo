@@ -5,7 +5,7 @@ import { getAuth, onAuthStateChanged, GoogleAuthProvider, signInWithPopup,
   from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
 import { initializeFirestore, persistentLocalCache, persistentMultipleTabManager,
   doc, getDoc, setDoc, updateDoc, deleteDoc, addDoc, collection, onSnapshot, arrayUnion,
-  query, where, getDocs, writeBatch, increment }
+  query, where, getDocs, writeBatch, increment, deleteField }
   from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { getMessaging, getToken, isSupported }
   from "https://www.gstatic.com/firebasejs/10.12.2/firebase-messaging.js";
@@ -26,7 +26,7 @@ const LOCS = {
   utility:  { label: "Utility",  icon: "🧽" }
 };
 const LOC_ORDER = ["frigo", "freezer", "dispensa", "utility"];
-const UNITS = ["pz", "conf", "kg", "l"];
+const UNITS = ["pz", "conf", "g", "kg", "ml", "l"];
 const MEALS = [
   { id: "colazione", label: "Colazione", icon: "☕" },
   { id: "pranzo",    label: "Pranzo",    icon: "🍝" },
@@ -48,7 +48,16 @@ const dShort = iso => { if (!iso) return "—"; const [y, m, d] = iso.split("-")
 const round2 = x => Math.round(x * 100) / 100;
 const num = x => (Math.round(x * 100) / 100).toLocaleString("it-IT", { maximumFractionDigits: 2 });
 const eur = v => (v || 0).toLocaleString("it-IT", { style: "currency", currency: "EUR" });
-const stepOf = u => (u === "kg" || u === "l") ? 0.25 : 1;
+const stepOf = (u, def) => (u === "g" || u === "ml") ? ((def && def <= 200) ? 10 : 50) : (u === "kg" || u === "l") ? 0.25 : 1;
+const priceBase = u => (u === "g" || u === "ml") ? 1000 : 1;
+const priceUnit = u => u === "g" ? "kg" : u === "ml" ? "l" : (u || "pz");
+const valueOf = (q, u, price) => price != null && price > 0 ? round2(q * price / priceBase(u)) : null;
+const convertQty = (q, from, to) => {
+  if (from === to) return q;
+  if (from === "kg" && to === "g") return q * 1000; if (from === "g" && to === "kg") return q / 1000;
+  if (from === "l" && to === "ml") return q * 1000; if (from === "ml" && to === "l") return q / 1000;
+  return null;
+};
 const fmtQty = (q, u) => num(q) + " " + (u || "pz");
 const cap = s => s ? s.charAt(0).toUpperCase() + s.slice(1) : "";
 const norm = s => String(s || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "")
@@ -99,7 +108,7 @@ async function safe(fn){
    Stato e Firebase
    ========================================================= */
 const state = {
-  fridge: [], shopping: [], meals: [], catalogDocs: {},
+  fridge: [], shopping: [], meals: [], catalogDocs: {}, catDocs: {}, loaded: { house: false, catalog: false },
   house: { alertDays: 3, memberNames: {}, members: [], extraPeople: [] },
   loc: "all", tab: "casa", period: "week"
 };
@@ -107,27 +116,45 @@ let auth, db, me = null, hid = null, unsubs = [];
 const migrated = new Set();
 const col = name => collection(db, "households", hid, name);
 
-/* ---------- Catalogo ---------- */
+/* ---------- Catalogo: base da catalogo.js + modifiche della famiglia su Firebase ---------- */
+const OLD_CAT = { latticini: "latticini-e-uova", frutta: "frutta", verdura: "verdura", carne: "carne-e-pesce", salumi: "salumi",
+  pane: "pane-e-forno", dispensa: "pasta-e-riso", condimenti: "condimenti-e-salse", colazione: "colazione-e-dolci",
+  surgelati: "surgelati", bevande: "bevande", casa: "casa-e-pulizia", igiene: "igiene-personale", altro: "altro" };
+const BUILTIN_CATS = CAT.categories.map((c, i) => ({ ...c, order: i + 1, builtin: true }));
+const BUILTIN_CAT_IDS = new Set(BUILTIN_CATS.map(c => c.id));
 const BUILTIN = CAT.products.map(r => ({
-  id: "b-" + slug(r[0]), name: r[0], emoji: r[1], cat: r[2], unit: r[3],
-  days: r[4], loc: r[5], openDays: r[6] ?? null, price: null, uses: 0, builtin: true
+  id: "b-" + slug(r[0]), name: r[0], emoji: r[1], cat: r[2], unit: r[3] || "pz", defQty: r[4] ?? 1,
+  days: r[5] ?? null, loc: r[6] || "frigo", openDays: r[7] ?? null, afterOpen: r[8] ?? null, price: r[9] ?? null, uses: 0, builtin: true
 }));
 const BUILTIN_IDS = new Set(BUILTIN.map(p => p.id));
-const catById = id => CAT.categories.find(c => c.id === id) || { id: "altro", name: "Altro", emoji: "🛒" };
+const clean = o => { const r = {}; for (const k in o) if (o[k] !== undefined) r[k] = o[k]; return r; };
 
-function products(){
-  const over = state.catalogDocs;
-  const list = BUILTIN.map(p => over[p.id] ? { ...p, ...over[p.id], id: p.id, builtin: true } : p);
-  for (const id in over) if (!BUILTIN_IDS.has(id)) list.push({ unit: "pz", loc: "frigo", days: null, cat: "altro", emoji: "🛒", uses: 0, ...over[id], id });
-  return list.filter(p => !p.hidden);
+function categoriesAll(){
+  const over = state.catDocs;
+  const list = BUILTIN_CATS.map(c => over[c.id] ? { ...c, ...clean(over[c.id]), id: c.id } : c);
+  for (const id in over) if (!BUILTIN_CAT_IDS.has(id)) list.push({ emoji: "🛒", name: "Categoria", order: 999, ...over[id], id });
+  if (!list.some(c => c.id === "altro")) list.push({ id: "altro", name: "Altro", emoji: "🛒", order: 1000, builtin: true });
+  return list.filter(c => !c.deleted || c.id === "altro").sort((a, b) => (a.order ?? 999) - (b.order ?? 999) || a.name.localeCompare(b.name));
 }
-function productById(id){ return id ? products().find(p => p.id === id) : null; }
+function catById(id){ const cs = categoriesAll(); return cs.find(c => c.id === id) || cs.find(c => c.id === "altro"); }
+function catOf(p){ return categoriesAll().some(c => c.id === p.cat) ? p.cat : "altro"; }
+function normCustom(p){
+  return { unit: "pz", defQty: 1, loc: "frigo", days: null, openDays: null, afterOpen: null, emoji: "🛒", uses: 0, ...p,
+    cat: OLD_CAT[p.cat] || p.cat || "altro" };
+}
+function productsAll(){
+  const over = state.catalogDocs;
+  const list = BUILTIN.map(p => over[p.id] ? { ...p, ...clean(over[p.id]), id: p.id, builtin: true } : p);
+  for (const id in over) if (!BUILTIN_IDS.has(id) && over[id].name) list.push(normCustom({ ...over[id], id }));
+  return list;
+}
+function products(){ return productsAll().filter(p => !p.hidden); }
+function productById(id){ return id ? productsAll().find(p => p.id === id) : null; }
 function findProduct(name){
   const q = norm(name), qs = stem(name);
   if (!q) return null;
-  const all = products();
   let best = null, score = 0;
-  for (const p of all){
+  for (const p of products()){
     const n = norm(p.name), s = stem(p.name);
     let sc = 0;
     if (n === q) sc = 100;
@@ -140,14 +167,49 @@ function findProduct(name){
   return best;
 }
 const emojiOf = it => it.emoji || (findProduct(it.name) || {}).emoji || "🛒";
+const prodOf = it => productById(it.productId) || findProduct(it.name) || {};
+const stepFor = it => stepOf(it.unit, prodOf(it).defQty);
 
-function learnOp(p, { days, price, use = true } = {}){
-  const id = (p.productId && (BUILTIN_IDS.has(p.productId) || p.productId.startsWith("c-"))) ? p.productId : "c-" + slug(p.name);
-  const data = { name: p.name, emoji: p.emoji || "🛒", cat: p.cat || "altro", unit: p.unit || "pz", loc: p.loc || "frigo" };
-  if (days !== undefined) data.days = days;
+// Ricorda prezzo e frequenza d'uso; i prodotti nuovi vengono aggiunti al catalogo con i loro default
+function learnOp(p, { price, days, use = true } = {}){
+  const known = (p.productId && (BUILTIN_IDS.has(p.productId) || state.catalogDocs[p.productId])) ? p.productId : null;
+  const id = known || "c-" + slug(p.name);
+  const data = { v: 3 };
+  if (!known && !BUILTIN_IDS.has(id) && !state.catalogDocs[id]){
+    Object.assign(data, { name: p.name, emoji: p.emoji || "🛒", cat: p.cat || "altro", unit: p.unit || "pz",
+      defQty: p.qty || 1, loc: p.loc || "frigo", days: days ?? null, openDays: null, afterOpen: null });
+  }
   if (price != null && price > 0) data.price = price;
   if (use) data.uses = increment(1);
   return { ref: doc(col("catalog"), id), data, id };
+}
+
+// Una tantum: allinea al nuovo database le personalizzazioni salvate dalla versione 2
+let catMigrating = false;
+function migrateCatalog(){
+  if (catMigrating || !state.loaded.house || !state.loaded.catalog || (state.house.catalogVersion || 0) >= 3) return;
+  catMigrating = true;
+  const kind = u => (u === "kg" || u === "g") ? "w" : (u === "l" || u === "ml") ? "v" : "n";
+  safe(async () => {
+    const b = writeBatch(db);
+    for (const [id, d] of Object.entries(state.catalogDocs)){
+      if (d.v === 3) continue;
+      const ref = doc(col("catalog"), id);
+      if (BUILTIN_IDS.has(id)){
+        const base = BUILTIN.find(x => x.id === id);
+        const keep = { v: 3, uses: d.uses || 0 };
+        if (d.price != null && (!d.unit || kind(d.unit) === kind(base.unit))) keep.price = d.price;
+        if (d.hidden) keep.hidden = true;
+        b.set(ref, keep);
+      } else {
+        const unit = d.unit === "kg" ? "g" : d.unit === "l" ? "ml" : (d.unit || "pz");
+        b.set(ref, { v: 3, cat: OLD_CAT[d.cat] || d.cat || "altro", unit,
+          defQty: d.defQty ?? ((unit === "g" || unit === "ml") ? 1000 : 1), openDays: d.openDays ?? null, afterOpen: d.afterOpen ?? null }, { merge: true });
+      }
+    }
+    b.update(doc(db, "households", hid), { catalogVersion: 3 });
+    await b.commit();
+  }).finally(() => { catMigrating = false; });
 }
 
 /* ---------- Persone ---------- */
@@ -181,7 +243,7 @@ async function onUser(u){
   catch (e){ console.error(e); }
   if (hid) startHousehold(); else openHome();
 }
-function stopSubs(){ unsubs.forEach(f => f()); unsubs = []; }
+function stopSubs(){ unsubs.forEach(f => f()); unsubs = []; state.loaded = { house: false, catalog: false }; }
 
 const authMsg = code => ({
   "auth/invalid-credential": "Email o password errate.", "auth/wrong-password": "Email o password errate.",
@@ -263,8 +325,9 @@ function startHousehold(){
   unsubs.push(onSnapshot(doc(db, "households", hid), s => {
     if (!s.exists()) return;
     state.house = Object.assign({ alertDays: 3, memberNames: {}, members: [], extraPeople: [] }, s.data());
+    state.loaded.house = true;
     $("#houseName").textContent = state.house.name || "Frigo di casa";
-    renderAll(); renderSettings();
+    renderAll(); renderSettings(); migrateCatalog();
   }, tag("house")));
   unsubs.push(onSnapshot(col("fridge"), s => {
     state.fridge = s.docs.map(d => ({ id: d.id, ...d.data() }));
@@ -272,8 +335,12 @@ function startHousehold(){
   }, tag("fridge")));
   unsubs.push(onSnapshot(col("shopping"), s => { state.shopping = s.docs.map(d => ({ id: d.id, ...d.data() })); renderAll(); }, tag("shopping")));
   unsubs.push(onSnapshot(col("catalog"), s => {
-    const m = {}; s.docs.forEach(d => { m[d.id] = d.data(); }); state.catalogDocs = m; renderAll();
+    const m = {}; s.docs.forEach(d => { m[d.id] = d.data(); }); state.catalogDocs = m; state.loaded.catalog = true;
+    renderAll(); migrateCatalog(); refreshOpenViews();
   }, tag("catalog")));
+  unsubs.push(onSnapshot(col("categories"), s => {
+    const m = {}; s.docs.forEach(d => { m[d.id] = d.data(); }); state.catDocs = m; renderAll(); refreshOpenViews();
+  }, tag("categories")));
   unsubs.push(onSnapshot(query(col("meals"), where("date", ">=", addDays(today(), -45))), s => {
     state.meals = s.docs.map(d => ({ id: d.id, ...d.data() })); renderMeals();
   }, tag("meals")));
@@ -356,7 +423,8 @@ function itemCard(i){
   const dates = [el("span", null, "IN ", el("b", null, dShort(i.addedAt)))];
   if (i.expiresAt) dates.push(" · ", el("span", null, "SCAD ", el("b", null, dShort(i.expiresAt))));
   if (i.openedAt) dates.push(" · aperto il " + dShort(i.openedAt));
-  if (i.price) dates.push(" · " + eur(round2(q * i.price)));
+  const val = valueOf(q, u, i.price);
+  if (val) dates.push(" · " + eur(val));
   return el("li", { class: "item " + s.cls },
     el("span", { class: "stripe", "aria-hidden": "true" }),
     el("div", null,
@@ -367,9 +435,9 @@ function itemCard(i){
       el("div", { class: "dates" }, dates),
       el("div", { class: "row-actions" },
         el("span", { class: "stepper" },
-          el("button", { onclick: () => minusItem(i), "aria-label": "Togli " + num(stepOf(u)) + " " + u }, "−"),
+          el("button", { onclick: () => minusItem(i), "aria-label": "Togli " + num(stepFor(i)) + " " + u }, "−"),
           el("span", { class: "v" }, fmtQty(q, u)),
-          el("button", { onclick: () => plusItem(i), "aria-label": "Aggiungi " + num(stepOf(u)) + " " + u }, "+")),
+          el("button", { onclick: () => plusItem(i), "aria-label": "Aggiungi " + num(stepFor(i)) + " " + u }, "+")),
         loc !== "utility" ? el("button", { class: "btn small", onclick: () => openUse(i) }, "Utilizza") : null,
         el("button", { class: "btn ghost small", onclick: () => rebuy(i) }, "Ricompra"))));
 }
@@ -401,19 +469,36 @@ function renderHome(){
 function eventData(type, item, qty, extra = {}){
   const price = item.price ?? null;
   return { type, name: item.name, productId: item.productId || null, cat: item.cat || "altro",
-    qty: round2(qty), unit: item.unit || "pz", price, value: price != null ? round2(qty * price) : null,
+    qty: round2(qty), unit: item.unit || "pz", price, value: valueOf(qty, item.unit, price),
     date: today(), ts: Date.now(), by: me ? me.uid : "", ...extra };
 }
+// Apertura automatica: accorcia la scadenza e sposta secondo «dopo apertura va in»
+const openExpiry = (i, p) => { const lim = addDays(today(), p.openDays ?? DEFAULT_OPEN_DAYS); return (!i.expiresAt || i.expiresAt > lim) ? lim : i.expiresAt; };
+function autoOpen(i){
+  if (i.openedAt) return null;
+  const p = prodOf(i);
+  if (p.openDays == null && !p.afterOpen) return null;
+  const upd = { openedAt: today(), expBeforeOpen: i.expiresAt || "", expiresAt: openExpiry(i, p) };
+  let note = emojiOf(i) + " " + i.name + ": aperto";
+  if (p.afterOpen && p.afterOpen !== (i.location || "frigo")){ upd.location = p.afterOpen; note = emojiOf(i) + " " + i.name + " → " + LOCS[p.afterOpen].label; }
+  note += ", scade il " + dShort(upd.expiresAt);
+  return { upd, note };
+}
 function minusItem(i){
-  const q = qtyOf(i), st = stepOf(i.unit), left = round2(q - st);
+  const q = qtyOf(i), st = stepFor(i), left = round2(q - st);
   if (left <= 0.0001){
     safe(() => addDoc(col("events"), eventData("use", i, q)));
     finishItems([i]);
   } else {
-    safe(async () => { await updateDoc(doc(col("fridge"), i.id), { qty: left }); await addDoc(col("events"), eventData("use", i, st)); });
+    const ao = autoOpen(i);
+    safe(async () => {
+      await updateDoc(doc(col("fridge"), i.id), { qty: left, ...(ao ? ao.upd : {}) });
+      await addDoc(col("events"), eventData("use", i, st));
+      if (ao) toast(ao.note);
+    });
   }
 }
-function plusItem(i){ safe(() => updateDoc(doc(col("fridge"), i.id), { qty: round2(qtyOf(i) + stepOf(i.unit)) })); }
+function plusItem(i){ safe(() => updateDoc(doc(col("fridge"), i.id), { qty: round2(qtyOf(i) + stepFor(i)) })); }
 
 function shopHas(name){ const n = norm(name); return state.shopping.some(s => !s.done && norm(s.name) === n); }
 function addToShopping(p, { silent } = {}){
@@ -465,7 +550,11 @@ async function finishItems(items){
 /* =========================================================
    Pannelli a tutto schermo
    ========================================================= */
+const backHandlers = {};
+let openViews = {};
+function refreshOpenViews(){ for (const k in openViews) if (openViews[k] && $("#" + k).open) { try { openViews[k](); } catch (e){ console.error(e); } } }
 function openSheet(id, title, body, foot){
+  backHandlers[id] = null; openViews[id] = null;
   $("#" + id + "Title").textContent = title;
   $("#" + id + "Body").replaceChildren(body);
   $("#" + id + "Body").scrollTop = 0;
@@ -473,7 +562,8 @@ function openSheet(id, title, body, foot){
   const d = $("#" + id); if (!d.open) d.showModal();
 }
 function closeSheet(id){ const d = $("#" + id); if (d.open) d.close(); }
-document.querySelectorAll("[data-close]").forEach(b => b.addEventListener("click", () => closeSheet(b.dataset.close)));
+document.querySelectorAll("[data-close]").forEach(b => b.addEventListener("click", () => { const h = backHandlers[b.dataset.close]; if (!(h && h())) closeSheet(b.dataset.close); }));
+["sheet", "sheet2"].forEach(id => $("#" + id).addEventListener("cancel", e => { const h = backHandlers[id]; if (h && h()) e.preventDefault(); }));
 
 // Piccoli componenti riutilizzabili con aggiornamento mirato
 function makeUI(){
@@ -536,85 +626,128 @@ const priceStep = (get, set, dir) => { const v = get(); set(v == null ? (dir > 0
    ========================================================= */
 let picker = null;
 function openPicker(mode, opts = {}){
-  // mode: "home" (aggiungi in casa), "shop" (aggiungi alla spesa), "replace" (cambia prodotto in modifica)
-  const freq = products().filter(p => p.uses > 0);
-  picker = { mode, q: "", cat: freq.length ? "freq" : (mode === "shop" ? "latticini" : "latticini"), added: {}, onPick: opts.onPick };
+  // mode: "home" (metti in casa), "shop" (aggiungi alla spesa), "replace" (cambia prodotto in modifica)
   const sheetId = mode === "replace" ? "sheet2" : "sheet";
-  const input = el("input", { type: "search", placeholder: "Cerca o scrivi un prodotto nuovo…", autocomplete: "off", enterkeyhint: "done", "aria-label": "Cerca prodotto" });
-  const grid = el("div", { class: "grid" });
-  const catsBox = el("div", { class: "chips-row", style: "margin-top:8px" });
-  const renderCats = () => {
-    const mk = (id, label) => el("button", { class: "qchip", style: picker.cat === id && !picker.q ? "background:var(--accent);color:var(--accent-ink);font-weight:600" : "",
-      onclick: () => { picker.cat = id; picker.q = ""; input.value = ""; renderCats(); renderGrid(); } }, label);
-    catsBox.replaceChildren(mk("freq", "⭐ Frequenti"), ...CAT.categories.map(c => mk(c.id, c.emoji + " " + c.name)));
+  picker = { mode, q: "", level: "cats", cat: null, added: {}, onPick: opts.onPick, sheetId };
+  const input = el("input", { type: "search", placeholder: "Cerca in tutte le categorie…", autocomplete: "off", enterkeyhint: "done", "aria-label": "Cerca prodotto" });
+  const area = el("div");
+  const doneBtn = el("button", { class: "btn", onclick: () => closeSheet(sheetId) }, "Fatto");
+  const updateFoot = () => {
+    const n = Object.values(picker.added).reduce((a, b) => a + b, 0);
+    doneBtn.textContent = n ? (mode === "shop" ? "Fatto (" + n + " in lista)" : "Fatto (" + n + " in casa)") : "Fatto";
   };
-  const renderGrid = () => {
+  const tile = p => {
+    const n = picker.added[p.id];
+    return el("button", { class: "tile-btn", onclick: () => pick(p) },
+      n ? el("span", { class: "badge" }, "+" + n) : null, el("span", { class: "e" }, p.emoji), el("span", { class: "t" }, p.name));
+  };
+  const byUse = (a, b) => (b.uses || 0) - (a.uses || 0) || a.name.localeCompare(b.name);
+  const render = () => {
     const all = products();
-    let list;
     if (picker.q){
       const q = norm(picker.q), qs = stem(picker.q);
-      list = all.filter(p => norm(p.name).includes(q) || stem(p.name).includes(qs))
-        .sort((a, b) => (b.uses || 0) - (a.uses || 0) || a.name.localeCompare(b.name)).slice(0, 40);
-    } else if (picker.cat === "freq"){
-      list = all.filter(p => p.uses > 0).sort((a, b) => b.uses - a.uses).slice(0, 30);
-    } else {
-      list = all.filter(p => p.cat === picker.cat).sort((a, b) => (b.uses || 0) - (a.uses || 0) || a.name.localeCompare(b.name));
+      const list = all.filter(p => norm(p.name).includes(q) || stem(p.name).includes(qs)).sort(byUse).slice(0, 48);
+      const tiles = list.map(tile);
+      if (!all.some(p => norm(p.name) === q)){
+        tiles.unshift(el("button", { class: "tile-btn new", onclick: () => pick(null, cap(picker.q.trim())) },
+          el("span", { class: "e" }, "＋"), el("span", { class: "t" }, "Nuovo: " + cap(picker.q.trim()))));
+      }
+      area.replaceChildren(el("div", { class: "grid small" }, tiles));
+      return;
     }
-    const tiles = list.map(p => {
-      const n = picker.added[p.id];
-      return el("button", { class: "tile-btn", onclick: () => pick(p) },
-        n ? el("span", { class: "badge" }, "+" + n) : null,
-        el("span", { class: "e" }, p.emoji), el("span", { class: "t" }, p.name));
-    });
-    const exact = picker.q && all.some(p => norm(p.name) === norm(picker.q));
-    if (picker.q && !exact){
-      tiles.unshift(el("button", { class: "tile-btn new", onclick: () => pick(null, cap(picker.q.trim())) },
-        el("span", { class: "e" }, "＋"), el("span", { class: "t" }, "Nuovo: " + cap(picker.q.trim()))));
+    if (picker.level === "cats"){
+      const freq = all.filter(p => p.uses > 0);
+      const cats = categoriesAll().map(c => ({ c, n: all.filter(p => catOf(p) === c.id).length })).filter(x => x.n > 0 || x.c.id !== "altro");
+      const catTile = (id, emoji, name, n) => el("button", { class: "cat-tile", onclick: () => { picker.level = "prods"; picker.cat = id; render(); $("#" + sheetId + "Body").scrollTop = 0; } },
+        el("span", { class: "e" }, emoji), el("span", { class: "t" }, el("b", null, name), el("span", { class: "muted small" }, n + (n === 1 ? " prodotto" : " prodotti"))));
+      area.replaceChildren(el("div", { class: "grid cats" },
+        freq.length ? catTile("freq", "⭐", "Frequenti", Math.min(freq.length, 32)) : null,
+        ...cats.map(x => catTile(x.c.id, x.c.emoji, x.c.name, x.n))));
+      return;
     }
-    if (!tiles.length) tiles.push(el("div", { class: "muted", style: "grid-column:1/-1;padding:20px 4px" }, "Ancora nessun prodotto frequente: scegli una categoria qui sopra."));
-    grid.replaceChildren(...tiles);
+    const isFreq = picker.cat === "freq";
+    const list = isFreq ? all.filter(p => p.uses > 0).sort((a, b) => b.uses - a.uses).slice(0, 32) : all.filter(p => catOf(p) === picker.cat).sort(byUse);
+    const c = isFreq ? { emoji: "⭐", name: "Frequenti" } : catById(picker.cat);
+    area.replaceChildren(
+      el("div", { class: "level-head" },
+        el("button", { class: "x", "aria-label": "Torna alle categorie", onclick: () => { picker.level = "cats"; render(); } }, "←"),
+        el("span", null, c.emoji + " " + c.name)),
+      el("div", { class: "grid small" }, list.length ? list.map(tile) : el("div", { class: "muted", style: "grid-column:1/-1;padding:16px 4px" }, "Nessun prodotto in questa categoria.")));
   };
   const pick = (p, newName) => {
     if (mode === "shop"){
       const prod = p || { name: newName, emoji: "🛒", id: null };
       addToShopping({ name: prod.name, productId: prod.id, emoji: prod.emoji }).then(ok => {
-        if (ok){ picker.added[prod.id || newName] = (picker.added[prod.id || newName] || 0) + 1; toast(prod.name + " in lista"); renderGrid(); updateFoot(); }
+        if (ok){ const k = prod.id || newName; picker.added[k] = (picker.added[k] || 0) + 1; toast(prod.name + " in lista"); render(); updateFoot(); }
       });
-      if (newName){ picker.q = ""; input.value = ""; renderCats(); }
+      if (newName){ picker.q = ""; input.value = ""; }
       return;
     }
-    const prod = p || { id: null, name: newName, emoji: (catById(picker.cat).emoji) || "🛒", cat: picker.cat !== "freq" ? picker.cat : "altro", unit: "pz", days: 7, loc: "frigo" };
+    const catGuess = picker.level === "prods" && picker.cat !== "freq" ? picker.cat : "altro";
+    const prod = p || { id: null, name: newName, emoji: catById(catGuess).emoji || "🛒", cat: catGuess, unit: "pz", defQty: 1, days: 7, loc: "frigo" };
     if (mode === "replace"){ closeSheet("sheet2"); picker.onPick && picker.onPick(prod, !p); return; }
-    openDetails(newDraft(prod, !p), "sheet2");
+    openDetails(newDraft(prod, !p), "sheet2", () => { const k = prod.id || "c-" + slug(prod.name); picker.added[k] = (picker.added[k] || 0) + 1; picker.q = ""; input.value = ""; render(); updateFoot(); });
   };
-  input.addEventListener("input", () => { picker.q = input.value; renderCats(); renderGrid(); });
+  input.addEventListener("input", () => { picker.q = input.value; render(); });
   input.addEventListener("keydown", e => { if (e.key === "Enter"){ e.preventDefault(); input.blur(); } });
-  renderCats(); renderGrid();
-  const doneBtn = el("button", { class: "btn", onclick: () => closeSheet(sheetId) }, "Fatto");
-  const updateFoot = () => { const n = Object.values(picker.added).reduce((a, b) => a + b, 0); doneBtn.textContent = n ? "Fatto (" + n + " in lista)" : "Fatto"; };
-  const body = el("div", null, el("div", { class: "search" }, input, catsBox), grid);
-  openSheet(sheetId, mode === "shop" ? "Aggiungi alla spesa" : mode === "replace" ? "Cambia prodotto" : "Cosa metti in casa?", body,
-    mode === "shop" ? [doneBtn] : []);
+  render();
+  openSheet(sheetId, mode === "shop" ? "Aggiungi alla spesa" : mode === "replace" ? "Cambia prodotto" : "Cosa metti in casa?",
+    el("div", null, el("div", { class: "search" }, input), area), mode === "replace" ? [] : [doneBtn]);
+  backHandlers[sheetId] = () => { if (picker && picker.sheetId === sheetId && !picker.q && picker.level === "prods"){ picker.level = "cats"; render(); return true; } return false; };
+  openViews[sheetId] = render;
 }
 
 /* =========================================================
    Inserimento e modifica di un prodotto
    ========================================================= */
 function newDraft(p, isNewProduct){
-  const loc = p.loc || "frigo";
   return { mode: "new", isNewProduct: !!isNewProduct, productId: p.id || null, name: p.name, emoji: p.emoji || "🛒",
-    cat: p.cat || "altro", unit: p.unit || "pz", qty: 1, price: p.price ?? null, loc,
+    cat: p.cat || "altro", unit: p.unit || "pz", qty: p.defQty || 1, defQty: p.defQty || 1, price: p.price ?? null, loc: p.loc || "frigo",
     addedAt: today(), expiresAt: p.days != null ? addDays(today(), p.days) : "", openedAt: "", expBeforeOpen: "",
-    openDays: p.openDays ?? null };
+    openDays: p.openDays ?? null, afterOpen: p.afterOpen ?? null, days: p.days ?? null };
 }
 function openEdit(i){
-  const p = productById(i.productId) || findProduct(i.name) || {};
+  const p = prodOf(i);
   openDetails({ mode: "edit", id: i.id, orig: i, productId: i.productId || p.id || null, name: i.name, emoji: emojiOf(i),
-    cat: i.cat || p.cat || "altro", unit: i.unit || "pz", qty: qtyOf(i), price: i.price ?? null, loc: i.location || "frigo",
+    cat: i.cat || p.cat || "altro", unit: i.unit || "pz", qty: qtyOf(i), defQty: p.defQty || 1, price: i.price ?? null, loc: i.location || "frigo",
     addedAt: i.addedAt || today(), expiresAt: i.expiresAt || "", openedAt: i.openedAt || "", expBeforeOpen: i.expBeforeOpen || "",
-    openDays: p.openDays ?? null, addedBy: i.addedBy }, "sheet");
+    openDays: p.openDays ?? null, afterOpen: p.afterOpen ?? null, addedBy: i.addedBy }, "sheet");
 }
-function openDetails(d, sheetId){
+function qtyBlock(ui, d){
+  const st = () => stepOf(d.unit, d.defQty);
+  const shortcutBase = () => (d.unit === "g" || d.unit === "ml") ? (d.defQty || 100) : (d.unit === "kg" || d.unit === "l") ? 1 : null;
+  const sc = el("div", { class: "opts", style: "margin-top:8px" });
+  const upSc = () => {
+    const b = shortcutBase();
+    sc.hidden = !b;
+    if (!b) return;
+    sc.replaceChildren(...[0.5, 1, 2].map(k => el("button", { class: "opt", type: "button", "aria-pressed": String(round2(d.qty) === round2(b * k)),
+      onclick: () => { d.qty = round2(b * k); ui.refresh(); } }, fmtQty(round2(b * k), d.unit))));
+  };
+  ui.when(() => { upSc(); return !!shortcutBase(); }, sc);
+  return el("div", { class: "block" }, el("div", { class: "lbl" }, "Quantità"),
+    el("div", { class: "inline" },
+      ui.stepper(() => fmtQty(d.qty, d.unit), () => { d.qty = Math.max(st(), round2(d.qty - st())); }, () => { d.qty = round2(d.qty + st()); })),
+    el("div", { style: "height:8px" }),
+    ui.opts(UNITS.map(u => ({ v: u, label: u })), () => d.unit, v => {
+      const conv = convertQty(d.qty, d.unit, v);
+      d.unit = v;
+      d.qty = conv != null ? round2(conv) : ((v === "g" || v === "ml") ? (d.defQty > 1 ? d.defQty : 100) : 1);
+      if (stepOf(v) === 1) d.qty = Math.max(1, Math.round(d.qty));
+    }),
+    sc);
+}
+function priceBlock(ui, d){
+  return el("div", { class: "block" }, el("div", { class: "lbl" }, "Prezzo (facoltativo)"),
+    el("div", { class: "inline" },
+      el("span", { class: "mini" },
+        el("button", { type: "button", onclick: () => { priceStep(() => d.price, v => d.price = v, -1); ui.refresh(); } }, "−"),
+        ui.priceInput(() => d.price, v => d.price = v),
+        el("button", { type: "button", onclick: () => { priceStep(() => d.price, v => d.price = v, 1); ui.refresh(); } }, "+")),
+      ui.text(() => "€ / " + priceUnit(d.unit), "span", { class: "muted" }),
+      ui.text(() => { const v = valueOf(d.qty, d.unit, d.price); return v ? "Totale " + eur(v) : ""; }, "span", { class: "total" })));
+}
+function openDetails(d, sheetId, onSaved){
   const ui = makeUI();
   const nameT = ui.text(() => d.name, "span", { class: "n" });
   const emT = ui.text(() => d.emoji, "span", { class: "e" });
@@ -622,7 +755,8 @@ function openDetails(d, sheetId){
     if (sheetId === "sheet2"){ closeSheet("sheet2"); return; }
     openPicker("replace", { onPick: (p, isNew) => {
       Object.assign(d, { productId: p.id || null, name: p.name, emoji: p.emoji || d.emoji, cat: p.cat || d.cat, unit: p.unit || d.unit,
-        openDays: p.openDays ?? null, isNewProduct: isNew });
+        defQty: p.defQty || 1, openDays: p.openDays ?? null, afterOpen: p.afterOpen ?? null, isNewProduct: isNew });
+      if (d.mode === "new") d.qty = p.defQty || 1;
       if (p.price != null && d.price == null) d.price = p.price;
       ui.refresh();
     } });
@@ -632,33 +766,15 @@ function openDetails(d, sheetId){
   blocks.push(el("div", { class: "block" }, el("div", { class: "prod-head" }, emT, nameT, changeBtn),
     d.addedBy && d.mode === "edit" ? el("div", { class: "muted small", style: "margin-top:6px" }, "Inserito da " + (personName(d.addedBy) || "—")) : null));
 
-  // Categoria (solo per prodotti nuovi)
-  const catBlock = el("div", { class: "block" }, el("div", { class: "lbl" }, "Categoria"),
-    ui.opts(CAT.categories.map(c => ({ v: c.id, label: c.emoji + " " + c.name })), () => d.cat, v => {
+  const catBlock = el("div", { class: "block" }, el("div", { class: "lbl" }, "Categoria del nuovo prodotto"),
+    ui.opts(categoriesAll().map(c => ({ v: c.id, label: c.emoji + " " + c.name })), () => d.cat, v => {
       d.cat = v; d.emoji = catById(v).emoji;
-      if (v === "casa" || v === "igiene"){ d.loc = "utility"; d.expiresAt = ""; }
+      if (v === "casa-e-pulizia" || v === "igiene-personale"){ d.loc = "utility"; d.expiresAt = ""; }
     }));
   blocks.push(ui.when(() => d.isNewProduct, catBlock));
+  blocks.push(qtyBlock(ui, d));
+  blocks.push(priceBlock(ui, d));
 
-  // Quantità
-  blocks.push(el("div", { class: "block" }, el("div", { class: "lbl" }, "Quantità"),
-    el("div", { class: "inline" },
-      ui.stepper(() => fmtQty(d.qty, d.unit), () => { d.qty = Math.max(stepOf(d.unit), round2(d.qty - stepOf(d.unit))); }, () => { d.qty = round2(d.qty + stepOf(d.unit)); }),
-      ui.opts(UNITS.map(u => ({ v: u, label: u })), () => d.unit, v => { d.unit = v; if (stepOf(v) === 1) d.qty = Math.max(1, Math.round(d.qty)); })),
-    ui.when(() => stepOf(d.unit) < 1, el("div", { class: "opts", style: "margin-top:8px" },
-      [[0.5, "½"], [1, "1"], [2, "2"]].map(([v, t]) => el("button", { class: "opt", type: "button", onclick: () => { d.qty = v; ui.refresh(); } }, t))))));
-
-  // Prezzo
-  blocks.push(el("div", { class: "block" }, el("div", { class: "lbl" }, "Prezzo (facoltativo)"),
-    el("div", { class: "inline" },
-      el("span", { class: "mini" },
-        el("button", { type: "button", onclick: () => { priceStep(() => d.price, v => d.price = v, -1); ui.refresh(); } }, "−"),
-        ui.priceInput(() => d.price, v => d.price = v),
-        el("button", { type: "button", onclick: () => { priceStep(() => d.price, v => d.price = v, 1); ui.refresh(); } }, "+")),
-      ui.text(() => "€ / " + d.unit, "span", { class: "muted" }),
-      ui.text(() => d.price ? "Totale " + eur(round2(d.qty * d.price)) : "", "span", { class: "total" }))));
-
-  // Posizione
   blocks.push(el("div", { class: "block" }, el("div", { class: "lbl" }, "Dove"),
     ui.opts(LOC_ORDER.map(l => ({ v: l, label: LOCS[l].label, icon: LOCS[l].icon })), () => d.loc, v => {
       const was = d.loc; d.loc = v;
@@ -668,7 +784,6 @@ function openDetails(d, sheetId){
       }
     }, "loc4")));
 
-  // Date
   const shortcut = (label, n) => el("button", { class: "opt", type: "button", onclick: () => { d.expiresAt = addDays(today(), n); ui.refresh(); } }, label);
   blocks.push(el("div", { class: "block" },
     el("div", { class: "lbl" }, "Scadenza"),
@@ -687,21 +802,20 @@ function openDetails(d, sheetId){
         ui.datePicker(() => d.addedAt, v => d.addedAt = v),
         el("button", { type: "button", onclick: () => { if (d.addedAt < today()){ d.addedAt = addDays(d.addedAt, 1); ui.refresh(); } } }, "+")))));
 
-  // Aperto
   const openChk = el("input", { type: "checkbox" });
   openChk.addEventListener("change", () => {
     if (openChk.checked){
       d.openedAt = today(); d.expBeforeOpen = d.expiresAt;
       const lim = addDays(today(), d.openDays ?? DEFAULT_OPEN_DAYS);
       if (!d.expiresAt || d.expiresAt > lim) d.expiresAt = lim;
+      if (d.afterOpen && d.afterOpen !== d.loc){ d.loc = d.afterOpen; toast("Aperto: spostato in " + LOCS[d.afterOpen].label.toLowerCase()); }
     } else { d.openedAt = ""; if (d.expBeforeOpen) d.expiresAt = d.expBeforeOpen; d.expBeforeOpen = ""; }
     ui.refresh();
   });
   blocks.push(ui.when(() => d.loc !== "utility", el("div", { class: "block" },
-    el("label", { class: "check" }, openChk, ui.text(() => d.openedAt ? "Aperto il " + dShort(d.openedAt) + ": scadenza accorciata" : "Aperto (accorcia la scadenza a " + (d.openDays ?? DEFAULT_OPEN_DAYS) + " giorni)")))));
-  const upOpen = () => { openChk.checked = !!d.openedAt; };
+    el("label", { class: "check" }, openChk, ui.text(() => d.openedAt ? "Aperto il " + dShort(d.openedAt) + ": scadenza accorciata"
+      : "Aperto (dura " + (d.openDays ?? DEFAULT_OPEN_DAYS) + " giorni" + (d.afterOpen && d.afterOpen !== d.loc ? ", va in " + LOCS[d.afterOpen].label.toLowerCase() : "") + ")")))));
 
-  // Buttato / Elimina (solo modifica)
   if (d.mode === "edit"){
     blocks.push(el("div", { class: "block" }, el("div", { class: "lbl" }, "Non c’è più?"),
       el("div", { class: "opts" },
@@ -709,35 +823,34 @@ function openDetails(d, sheetId){
         el("button", { class: "btn ghost", type: "button", onclick: () => deleteItem(d) }, "Elimina (inserito per errore)"))));
   }
 
-  const save = el("button", { class: "btn", onclick: () => saveDetails(d, sheetId) }, d.mode === "edit" ? "Salva" : "Metti in casa");
+  const save = el("button", { class: "btn", onclick: () => saveDetails(d, sheetId, onSaved) }, d.mode === "edit" ? "Salva" : "Metti in casa");
   const cancel = el("button", { class: "btn ghost", onclick: () => closeSheet(sheetId) }, "Annulla");
   openSheet(sheetId, d.mode === "edit" ? "Modifica" : "Nuovo in casa", el("div", null, blocks), [cancel, save]);
-  ui.refresh(); upOpen();
+  ui.refresh(); openChk.checked = !!d.openedAt;
 }
 
-function saveDetails(d, sheetId){
+function saveDetails(d, sheetId, onSaved){
   if (!d.name) return;
   const data = { name: d.name, productId: d.productId, emoji: d.emoji, cat: d.cat, qty: round2(d.qty), unit: d.unit,
     price: d.price ?? null, location: d.loc, addedAt: d.addedAt, expiresAt: d.expiresAt || "", openedAt: d.openedAt || "", expBeforeOpen: d.expBeforeOpen || "" };
-  const days = d.expiresAt && !d.openedAt && d.loc !== "freezer" ? diffDays(d.addedAt, d.expiresAt) : undefined;
-  closeSheet(sheetId); if (sheetId === "sheet2") closeSheet("sheet");
+  const days = d.expiresAt && !d.openedAt && d.loc !== "freezer" ? diffDays(d.addedAt, d.expiresAt) : null;
+  closeSheet(sheetId);
+  if (sheetId === "sheet2" && !onSaved) closeSheet("sheet");
   safe(async () => {
     const b = writeBatch(db);
     if (d.mode === "edit"){
-      b.update(doc(col("fridge"), d.id), data);
-      const known = productById(d.productId);
-      const L = learnOp({ ...d, loc: known ? known.loc : d.loc }, { price: d.price, use: false });
+      const L = learnOp(d, { price: d.price, days, use: false });
+      b.update(doc(col("fridge"), d.id), { ...data, productId: L.id });
       b.set(L.ref, L.data, { merge: true });
-      if (!data.productId) b.update(doc(col("fridge"), d.id), { productId: L.id });
     } else {
-      const L = learnOp({ ...d }, { days: d.loc === "utility" ? null : days, price: d.price });
-      const ref = doc(col("fridge"));
-      b.set(ref, { ...data, productId: L.id, addedBy: me.uid, createdAt: Date.now() });
+      const L = learnOp({ ...d }, { price: d.price, days });
+      b.set(doc(col("fridge")), { ...data, productId: L.id, addedBy: me.uid, createdAt: Date.now() });
       b.set(doc(col("events")), eventData("in", { ...data, productId: L.id }, data.qty));
       b.set(L.ref, L.data, { merge: true });
     }
     await b.commit();
     toast(d.mode === "edit" ? "Salvato" : d.name + " messo in casa");
+    if (onSaved) onSaved();
   });
 }
 function wasteItem(d){
@@ -759,7 +872,7 @@ function deleteItem(d){
 /* =========================================================
    Utilizza (consumo legato a un pasto)
    ========================================================= */
-const roundAmt = (x, u) => stepOf(u) === 1 ? Math.max(0.5, Math.round(x * 2) / 2) : Math.max(0.05, round2(x));
+const roundAmt = (x, u, st) => (u === "pz" || u === "conf") ? Math.max(0.5, Math.round(x * 2) / 2) : Math.max(st, round2(Math.round(x / st) * st));
 let lastPeople = null;
 function defaultPeople(){
   const ids = people().map(p => p.id);
@@ -783,29 +896,40 @@ function whenBlock(ui, s){
 }
 function mealItem(it, qty, i = 0){
   return { name: it.name, emoji: emojiOf(it), qty: round2(qty), unit: it.unit || "pz",
-    value: it.price != null ? round2(qty * it.price) : null, ts: Date.now() + i };
+    value: valueOf(qty, it.unit, it.price), ts: Date.now() + i };
 }
 function openUse(i){
-  const q = qtyOf(i), u = i.unit || "pz";
-  const s = { amount: Math.min(q, stepOf(u)), date: today(), meal: defaultMeal(), people: defaultPeople() };
+  const q = qtyOf(i), u = i.unit || "pz", st = stepFor(i), p = prodOf(i);
+  const canOpen = !i.openedAt && (p.openDays != null || !!p.afterOpen);
+  const s = { amount: Math.min(q, (u === "g" || u === "ml") ? Math.min(q, roundAmt(q / 2, u, st)) : st), date: today(), meal: defaultMeal(), people: defaultPeople(),
+    restLoc: canOpen && p.afterOpen ? p.afterOpen : (i.location || "frigo"), open: canOpen };
   const ui = makeUI();
   const pb = peopleBlock(ui, s.people);
+  const openChk = el("input", { type: "checkbox" }); openChk.checked = s.open;
+  openChk.addEventListener("change", () => { s.open = openChk.checked; ui.refresh(); });
+  const restBlock = ui.when(() => q - s.amount > 0.0001, el("div", { class: "block" },
+    el("div", { class: "lbl" }, ui.text(() => "Il resto (" + fmtQty(round2(q - s.amount), u) + ") dove va?")),
+    ui.opts(LOC_ORDER.map(l => ({ v: l, label: LOCS[l].label, icon: LOCS[l].icon })), () => s.restLoc, v => s.restLoc = v, "loc4"),
+    !i.openedAt && (i.location || "frigo") !== "utility" ? el("label", { class: "check", style: "margin-top:8px" }, openChk,
+      ui.text(() => s.open ? "Aperto oggi: scade il " + dShort(openExpiry(i, p)) : "Segna come aperto (accorcia la scadenza)")) : null,
+    i.openedAt ? el("div", { class: "muted small", style: "margin-top:8px" }, "Aperto il " + dShort(i.openedAt) + ", scade il " + dShort(i.expiresAt)) : null));
   const body = el("div", null,
     el("div", { class: "block" }, el("div", { class: "prod-head" }, el("span", { class: "e" }, emojiOf(i)),
       el("span", { class: "n" }, i.name), el("span", { class: "muted" }, "in casa: " + fmtQty(q, u)))),
     el("div", { class: "block" }, el("div", { class: "lbl" }, "Quanto hai usato"),
       el("div", { class: "opts" },
         el("button", { class: "opt", type: "button", onclick: () => { s.amount = q; ui.refresh(); } }, "Tutto"),
-        el("button", { class: "opt", type: "button", onclick: () => { s.amount = Math.min(q, roundAmt(q / 2, u)); ui.refresh(); } }, "Metà"),
-        el("button", { class: "opt", type: "button", onclick: () => { s.amount = Math.min(q, roundAmt(q / 4, u)); ui.refresh(); } }, "¼")),
+        el("button", { class: "opt", type: "button", onclick: () => { s.amount = Math.min(q, roundAmt(q / 2, u, st)); ui.refresh(); } }, "Metà"),
+        el("button", { class: "opt", type: "button", onclick: () => { s.amount = Math.min(q, roundAmt(q / 4, u, st)); ui.refresh(); } }, "¼")),
       el("div", { style: "height:8px" }),
       ui.stepper(() => fmtQty(s.amount, u) + (s.amount >= q ? " (tutto)" : ""),
-        () => { s.amount = Math.max(stepOf(u) < 1 ? 0.25 : 0.5, round2(s.amount - stepOf(u))); },
-        () => { s.amount = Math.min(q, round2(s.amount + stepOf(u))); })),
+        () => { s.amount = Math.max(Math.min(st, q), round2(s.amount - st)); },
+        () => { s.amount = Math.min(q, round2(s.amount + st)); })),
+    restBlock,
     whenBlock(ui, s),
     el("div", { class: "block" }, el("div", { class: "lbl" }, "Chi ha mangiato"), pb.node));
-  ui.refresh(); pb.up();
   const origRefresh = ui.refresh; ui.refresh = () => { origRefresh(); pb.up(); };
+  ui.refresh();
   const ok = el("button", { class: "btn", onclick: () => confirmUse(i, s) }, "Registra");
   openSheet("sheet", "Utilizza", body, [el("button", { class: "btn ghost", onclick: () => closeSheet("sheet") }, "Annulla"), ok]);
 }
@@ -818,16 +942,33 @@ function mealWrite(b, date, meal, peopleIds, items){
   return ref.id;
 }
 function confirmUse(i, s){
-  const q = qtyOf(i), amt = Math.min(q, s.amount), left = round2(q - amt);
+  const q = qtyOf(i), amt = Math.min(q, s.amount), left = round2(q - amt), p = prodOf(i);
   const ids = [...s.people]; ls.set("frigo.lastPeople", JSON.stringify(ids));
   closeSheet("sheet");
   safe(async () => {
     const b = writeBatch(db);
     const mealId = mealWrite(b, s.date, s.meal, ids, [mealItem(i, amt)]);
     b.set(doc(col("events")), eventData("use", i, amt, { mealId, date: s.date }));
-    if (left > 0.0001) b.update(doc(col("fridge"), i.id), { qty: left });
+    let note = "";
+    if (left > 0.0001){
+      const upd = { qty: left };
+      if (s.restLoc !== (i.location || "frigo")){ upd.location = s.restLoc; note = " · resto in " + LOCS[s.restLoc].label.toLowerCase(); }
+      if (s.open && !i.openedAt){ upd.openedAt = today(); upd.expBeforeOpen = i.expiresAt || ""; upd.expiresAt = openExpiry(i, p); note += ", scade il " + dShort(upd.expiresAt); }
+      if (s.restLoc === "freezer" && (i.location || "frigo") !== "freezer"){ upd.expiresAt = addDays(today(), FREEZER_DAYS); upd.openedAt = ""; }
+      b.update(doc(col("fridge"), i.id), upd);
+    }
     await b.commit();
-    if (left <= 0.0001) finishItems([i]); else toast("Registrato: " + fmtQty(amt, i.unit) + " di " + i.name);
+    if (left <= 0.0001) finishItems([i]); else toast("Registrato " + fmtQty(amt, i.unit) + " di " + i.name + note);
+  });
+}
+
+function showInfo(title, lines){
+  return new Promise(resolve => {
+    const dlg = $("#ask");
+    $("#askBody").replaceChildren(el("h2", null, title), ...lines.map(t => el("div", { class: "check" }, t)),
+      el("div", { class: "foot" }, el("button", { class: "btn", onclick: () => dlg.close() }, "OK")));
+    dlg.addEventListener("close", () => resolve(), { once: true });
+    dlg.showModal();
   });
 }
 
@@ -877,8 +1018,8 @@ function openNewMeal(){
       const row = el("div", { class: "urow" },
         el("div", { class: "nm" }, el("b", null, emojiOf(i) + " " + i.name), el("span", { class: "muted small" }, "in casa " + fmtQty(q0, u))),
         el("span", { class: "mini" },
-          el("button", { type: "button", onclick: () => { s.used[i.id] = Math.max(0, round2((s.used[i.id] || 0) - stepOf(u))); up(); updateFoot(); } }, "−"), v,
-          el("button", { type: "button", onclick: () => { s.used[i.id] = Math.min(q0, round2((s.used[i.id] || 0) + stepOf(u))); up(); updateFoot(); } }, "+")),
+          el("button", { type: "button", onclick: () => { s.used[i.id] = Math.max(0, round2((s.used[i.id] || 0) - stepFor(i))); up(); updateFoot(); } }, "−"), v,
+          el("button", { type: "button", onclick: () => { s.used[i.id] = Math.min(q0, round2((s.used[i.id] || 0) + stepFor(i))); up(); updateFoot(); } }, "+")),
         el("button", { class: "btn ghost small", type: "button", onclick: () => { s.used[i.id] = q0; up(); updateFoot(); } }, "Tutto"));
       up(); return row;
     }));
@@ -899,15 +1040,20 @@ function saveMeal(s){
   if (!ids.length && !used.length){ toast("Scegli chi mangia o almeno un ingrediente."); return; }
   closeSheet("sheet");
   safe(async () => {
-    const b = writeBatch(db), finished = [];
+    const b = writeBatch(db), finished = [], notes = [];
     const mealId = mealWrite(b, s.date, s.meal, ids, used.map((x, k) => mealItem(x.it, x.a, k)));
     used.forEach(({ it, a }) => {
       const left = round2(qtyOf(it) - a);
       b.set(doc(col("events")), eventData("use", it, a, { mealId, date: s.date }));
-      if (left > 0.0001) b.update(doc(col("fridge"), it.id), { qty: left }); else finished.push(it);
+      if (left > 0.0001){
+        const ao = autoOpen(it);
+        if (ao) notes.push(ao.note);
+        b.update(doc(col("fridge"), it.id), { qty: left, ...(ao ? ao.upd : {}) });
+      } else finished.push(it);
     });
     await b.commit();
     toast("Pasto salvato");
+    if (notes.length) await showInfo("Resti aperti e spostati", notes);
     if (finished.length) finishItems(finished);
   });
 }
@@ -960,10 +1106,11 @@ $("#spesaFattaBtn").addEventListener("click", () => {
 function openBatch(entries, title){
   const rows = entries.map(e => {
     const p = productById(e.productId) || findProduct(e.name) || null;
-    const unit = e.unit || (p && p.unit) || "pz";
-    const loc = (p && p.loc) || "frigo";
+    const unit = (p && p.unit) || e.unit || "pz";
+    let qty = (p && p.defQty) || 1, rowUnit = unit;
+    if (e.qty != null){ const c = convertQty(e.qty, e.unit || unit, unit); if (c != null) qty = c; else { qty = e.qty; rowUnit = e.unit || unit; } }
     return { name: p && norm(p.name) === norm(e.name) ? p.name : e.name, productId: p ? p.id : null, emoji: p ? p.emoji : "🛒",
-      cat: p ? p.cat : "altro", unit, qty: e.qty || 1, price: p ? (p.price ?? null) : null, loc,
+      cat: p ? p.cat : "altro", unit: rowUnit, defQty: p ? p.defQty : 1, qty: round2(qty), price: p ? (p.price ?? null) : null, loc: (p && p.loc) || "frigo",
       expiresAt: p && p.days != null ? addDays(today(), p.days) : "", shopId: e.shopId || null, removed: false };
   });
   const list = el("div");
@@ -972,19 +1119,25 @@ function openBatch(entries, title){
   const render = () => {
     list.replaceChildren(...rows.filter(r => !r.removed).map(r => {
       const ui = makeUI();
+      const st = () => stepOf(r.unit, r.defQty);
       const unitBtn = ui.text(() => r.unit, "button", { class: "opt", type: "button", style: "min-height:36px;padding:4px 10px" });
-      unitBtn.addEventListener("click", () => { r.unit = UNITS[(UNITS.indexOf(r.unit) + 1) % UNITS.length]; if (stepOf(r.unit) === 1) r.qty = Math.max(1, Math.round(r.qty)); ui.refresh(); });
+      unitBtn.addEventListener("click", () => {
+        const nu = UNITS[(UNITS.indexOf(r.unit) + 1) % UNITS.length];
+        const c = convertQty(r.qty, r.unit, nu);
+        r.qty = c != null ? round2(c) : ((nu === "g" || nu === "ml") ? (r.defQty > 1 ? r.defQty : 100) : 1);
+        r.unit = nu; ui.refresh();
+      });
       const node = el("div", { class: "brow" },
         el("div", { class: "r1" }, el("span", { style: "font-size:1.4rem" }, r.emoji), el("span", { class: "nm" }, r.name),
           el("button", { class: "x", type: "button", "aria-label": "Togli " + r.name, onclick: () => { r.removed = true; render(); updateFoot(); } }, "✕")),
         el("div", { class: "r3" },
-          ui.stepper(() => num(r.qty), () => { r.qty = Math.max(stepOf(r.unit), round2(r.qty - stepOf(r.unit))); }, () => { r.qty = round2(r.qty + stepOf(r.unit)); }, "mini"),
+          ui.stepper(() => num(r.qty), () => { r.qty = Math.max(st(), round2(r.qty - st())); }, () => { r.qty = round2(r.qty + st()); }, "mini"),
           unitBtn,
           el("span", { class: "mini" },
             el("button", { type: "button", onclick: () => { priceStep(() => r.price, v => r.price = v, -1); ui.refresh(); } }, "−"),
             ui.priceInput(() => r.price, v => r.price = v),
             el("button", { type: "button", onclick: () => { priceStep(() => r.price, v => r.price = v, 1); ui.refresh(); } }, "+")),
-          ui.text(() => "€/" + r.unit, "span", { class: "muted small" })),
+          ui.text(() => "€/" + priceUnit(r.unit), "span", { class: "muted small" })),
         ui.opts(LOC_ORDER.map(l => ({ v: l, label: LOCS[l].label, icon: LOCS[l].icon })), () => r.loc, v => {
           const was = r.loc; r.loc = v;
           if (v === "freezer" && was !== "freezer"){ const left = daysLeft(r.expiresAt); if (left === null || left < FREEZER_DAYS) r.expiresAt = addDays(today(), FREEZER_DAYS); }
@@ -1006,7 +1159,7 @@ function openBatch(entries, title){
     safe(async () => {
       const b = writeBatch(db);
       sel.forEach(r => {
-        const L = learnOp(r, { days: r.expiresAt && r.loc !== "freezer" ? diffDays(today(), r.expiresAt) : undefined, price: r.price });
+        const L = learnOp(r, { price: r.price, days: r.expiresAt && r.loc !== "freezer" ? diffDays(today(), r.expiresAt) : null });
         const data = { name: r.name, productId: L.id, emoji: r.emoji, cat: r.cat, qty: round2(r.qty), unit: r.unit, price: r.price ?? null,
           location: r.loc, addedAt: today(), expiresAt: r.expiresAt || "", openedAt: "", expBeforeOpen: "", addedBy: me.uid, createdAt: Date.now() };
         b.set(doc(col("fridge")), data);
@@ -1032,7 +1185,8 @@ const NUMW = { un: 1, uno: 1, una: 1, due: 2, tre: 3, quattro: 4, cinque: 5, sei
 const ARTW = new Set(["il", "lo", "la", "i", "gli", "le", "l", "del", "dello", "della", "dei", "degli", "delle", "di", "da", "po", "qualche", "ancora", "comprare", "prendere", "serve", "servono", "anche"]);
 const UNITW = { chilo: "kg", chili: "kg", kg: "kg", chilogrammi: "kg", chilogrammo: "kg", litro: "l", litri: "l", pacco: "conf", pacchi: "conf",
   confezione: "conf", confezioni: "conf", pacchetto: "conf", pacchetti: "conf", scatola: "conf", scatole: "conf", bottiglia: "pz", bottiglie: "pz",
-  pezzi: "pz", pezzo: "pz", vasetto: "pz", vasetti: "pz", barattolo: "pz", barattoli: "pz", rotoli: "conf" };
+  pezzi: "pz", pezzo: "pz", vasetto: "pz", vasetti: "pz", barattolo: "pz", barattoli: "pz", rotoli: "conf",
+  grammi: "g", grammo: "g", g: "g", etto: "etto", etti: "etto", millilitri: "ml", ml: "ml" };
 function parseSpeech(text){
   const parts = text.toLowerCase().replace(/[.;]/g, ",").replace(/l'/g, "l ").split(/,|\s+e\s+|\s+ed\s+|\s+poi\s+|\s+più\s+/);
   const out = [];
@@ -1050,7 +1204,10 @@ function parseSpeech(text){
     const name = words.join(" ").trim();
     if (!name) continue;
     const p = findProduct(name);
-    out.push({ name: p ? p.name : cap(name), productId: p ? p.id : null, emoji: p ? p.emoji : "🛒", qty, unit: unit || (qty != null && p ? p.unit : null) || (qty != null ? "pz" : null) });
+    if (unit === "etto"){ qty = (qty || 1) * 100; unit = "g"; }
+    if (qty != null && !unit && p && ["g", "ml", "kg", "l"].includes(p.unit)){ qty = qty * (p.defQty || 1); unit = p.unit; }
+    if (qty != null && unit && p){ const c = convertQty(qty, unit, p.unit); if (c != null){ qty = round2(c); unit = p.unit; } }
+    out.push({ name: p ? p.name : cap(name), productId: p ? p.id : null, emoji: p ? p.emoji : "🛒", qty, unit: unit || (qty != null ? ((p && p.unit) || "pz") : null) });
   }
   return out;
 }
@@ -1142,7 +1299,7 @@ async function renderStats(){
   const allPriced = outEv.length > 0 && outEv.every(v => v.value != null);
   const pct = allPriced && (use.v + waste.v) > 0 ? Math.round(waste.v / (use.v + waste.v) * 100)
     : (use.n + waste.n) > 0 ? Math.round(waste.n / (use.n + waste.n) * 100) : 0;
-  const inHouse = round2(state.fridge.reduce((a, i) => a + (i.price ? qtyOf(i) * i.price : 0), 0));
+  const inHouse = round2(state.fridge.reduce((a, i) => a + (valueOf(qtyOf(i), i.unit, i.price) || 0), 0));
   const tile = (k, v, sub, cls) => el("div", { class: "tile" + (cls ? " " + cls : "") }, el("div", { class: "k" }, k), el("div", { class: "v" }, v), el("div", { class: "s" }, sub));
   const top = (t, by) => {
     const m = {};
@@ -1262,6 +1419,179 @@ function maybeHintNotifications(){
     el("button", { class: "btn ghost small", style: "margin-top:6px", onclick: () => { ls.set("frigo.hintDismissed", "1"); h.hidden = true; } }, "Non ora"));
   h.hidden = false;
 }
+
+/* =========================================================
+   Gestione catalogo: categorie e prodotti
+   ========================================================= */
+const EMOJIS = ["🧀","🥛","🥚","🧈","🥣","🍎","🍐","🍌","🍊","🍋","🥝","🍓","🍇","🍑","🍒","🍈","🍉","🍍","🥑","🫐","🥥","🥬","🥦","🥒","🍅","🍆","🫑","🥕","🌽","🧅","🧄","🥔","🍄","🌿","🎃","🫘","🫛","🥩","🍗","🍖","🥓","🌭","🍔","🐟","🐠","🦐","🦑","🦪","🍞","🥖","🥐","🫓","🥨","🍕","🍝","🍜","🍚","🥟","🌾","🥫","🫒","🧂","🍯","🍬","🍫","🍪","🧁","🍰","🍨","☕","🍵","🧃","🥤","💧","🍺","🍷","🍾","🧊","🧴","🧼","🧽","🧻","🫧","🧺","🧹","🪣","🪥","🪒","🗑️","🔋","💡","🧤","🐶","🐱","👶","💊","🛒","📦"];
+let cm = { level: "cats", cat: null };
+function emojiGrid(get, set, ui){
+  const box = el("div", { class: "emoji-grid" });
+  EMOJIS.forEach(e => {
+    const b = el("button", { type: "button", class: "em-btn", onclick: () => { set(e); ui.refresh(); } }, e);
+    box.append(b);
+  });
+  ui.when(() => { box.querySelectorAll(".em-btn").forEach(b => b.setAttribute("aria-pressed", String(b.textContent === get()))); return true; }, box);
+  return box;
+}
+function openCatalogManager(){
+  cm = { level: "cats", cat: null };
+  const area = el("div");
+  const render = () => {
+    const all = productsAll();
+    if (cm.level === "cats"){
+      const cats = categoriesAll();
+      area.replaceChildren(
+        el("p", { class: "muted small", style: "margin:0 2px 10px" }, "Tocca una categoria per vederne i prodotti. Con ↑ ↓ cambi l’ordine, con ✎ nome ed emoji."),
+        ...cats.map((c, k) => el("div", { class: "mrow" },
+          el("button", { class: "mmain", onclick: () => { cm.level = "prods"; cm.cat = c.id; render(); $("#sheetBody").scrollTop = 0; } },
+            el("span", { class: "e" }, c.emoji), el("span", { class: "grow" }, el("b", null, c.name),
+              el("span", { class: "muted small" }, " · " + all.filter(p => catOf(p) === c.id && !p.hidden).length))),
+          el("button", { class: "x", "aria-label": "Sposta su", disabled: k === 0 ? true : null, onclick: () => moveCat(c.id, -1) }, "↑"),
+          el("button", { class: "x", "aria-label": "Sposta giù", disabled: k === cats.length - 1 ? true : null, onclick: () => moveCat(c.id, 1) }, "↓"),
+          el("button", { class: "x", "aria-label": "Modifica " + c.name, onclick: () => editCategory(c) }, "✎"))),
+        el("button", { class: "btn soft wide", style: "margin-top:10px", onclick: () => editCategory(null) }, "＋ Nuova categoria"));
+      return;
+    }
+    const c = catById(cm.cat);
+    const list = all.filter(p => catOf(p) === c.id).sort((a, b) => (a.hidden ? 1 : 0) - (b.hidden ? 1 : 0) || a.name.localeCompare(b.name));
+    const meta = p => [fmtQty(p.defQty || 1, p.unit), p.days != null ? p.days + " gg" : "senza scadenza", LOCS[p.loc || "frigo"].label,
+      p.afterOpen ? "aperto → " + LOCS[p.afterOpen].label : null, p.price ? eur(p.price) + "/" + priceUnit(p.unit) : null].filter(Boolean).join(" · ");
+    area.replaceChildren(
+      el("div", { class: "level-head" }, el("button", { class: "x", "aria-label": "Torna alle categorie", onclick: () => { cm.level = "cats"; render(); } }, "←"),
+        el("span", null, c.emoji + " " + c.name)),
+      el("button", { class: "btn soft wide", style: "margin-bottom:10px", onclick: () => editProduct(null, c.id) }, "＋ Nuovo prodotto in " + c.name),
+      ...(list.length ? list.map(p => el("button", { class: "mrow mbtn" + (p.hidden ? " dim" : ""), onclick: () => editProduct(p) },
+        el("span", { class: "e" }, p.emoji), el("span", { class: "grow" }, el("b", null, p.name + (p.hidden ? " (nascosto)" : "")), el("span", { class: "muted small", style: "display:block" }, meta(p))), el("span", { class: "muted" }, "›")))
+        : [el("div", { class: "empty" }, el("strong", null, "Nessun prodotto"), "Aggiungine uno con il pulsante qui sopra.")]));
+  };
+  render();
+  openSheet("sheet", "Catalogo", area, [el("button", { class: "btn", onclick: () => closeSheet("sheet") }, "Fatto")]);
+  backHandlers.sheet = () => { if (cm.level === "prods"){ cm.level = "cats"; render(); return true; } return false; };
+  openViews.sheet = render;
+}
+function moveCat(id, dir){
+  const cats = categoriesAll(), k = cats.findIndex(c => c.id === id), j = k + dir;
+  if (j < 0 || j >= cats.length) return;
+  [cats[k], cats[j]] = [cats[j], cats[k]];
+  safe(async () => { const b = writeBatch(db); cats.forEach((c, n) => b.set(doc(col("categories"), c.id), { order: n + 1 }, { merge: true })); await b.commit(); });
+}
+function editCategory(c){
+  const d = { name: c ? c.name : "", emoji: c ? c.emoji : "🛒" };
+  const ui = makeUI();
+  const dlg = $("#ask");
+  const input = el("input", { type: "text", value: d.name, placeholder: "Nome della categoria", "aria-label": "Nome categoria" });
+  input.addEventListener("input", () => { d.name = input.value; });
+  const emT = ui.text(() => d.emoji, "span", { style: "font-size:2rem" });
+  $("#askBody").replaceChildren(
+    el("h2", null, c ? "Modifica categoria" : "Nuova categoria"),
+    el("div", { class: "inline" }, emT, input),
+    emojiGrid(() => d.emoji, v => d.emoji = v, ui),
+    el("div", { class: "foot" },
+      c && c.id !== "altro" ? el("button", { class: "btn danger", style: "margin-right:auto", onclick: () => { dlg.close(); deleteCategory(c); } }, "Elimina") : null,
+      el("button", { class: "btn ghost", onclick: () => dlg.close() }, "Annulla"),
+      el("button", { class: "btn", onclick: () => {
+        const name = d.name.trim(); if (!name){ input.focus(); return; }
+        const id = c ? c.id : "k-" + slug(name) + "-" + Date.now().toString(36).slice(-4);
+        const data = { name, emoji: d.emoji, deleted: false };
+        if (!c) data.order = categoriesAll().length + 1;
+        dlg.close();
+        safe(() => setDoc(doc(col("categories"), id), data, { merge: true }));
+      } }, "Salva")));
+  ui.refresh();
+  dlg.showModal();
+}
+function deleteCategory(c){
+  const prods = productsAll().filter(p => catOf(p) === c.id);
+  const dlg = $("#ask");
+  $("#askBody").replaceChildren(el("h2", null, "Eliminare " + c.name + "?"),
+    el("p", { class: "muted", style: "margin:0" }, prods.length ? "I suoi " + prods.length + " prodotti passano nella categoria «Altro»." : "La categoria è vuota."),
+    el("div", { class: "foot" },
+      el("button", { class: "btn ghost", onclick: () => dlg.close() }, "Annulla"),
+      el("button", { class: "btn danger", onclick: () => {
+        dlg.close(); cm.level = "cats";
+        safe(async () => {
+          const b = writeBatch(db);
+          b.set(doc(col("categories"), c.id), { deleted: true }, { merge: true });
+          prods.forEach(p => b.set(doc(col("catalog"), p.id), { cat: "altro", v: 3 }, { merge: true }));
+          await b.commit(); toast("Categoria eliminata");
+        });
+      } }, "Elimina")));
+  dlg.showModal();
+}
+function editProduct(p, catId){
+  const isNew = !p;
+  const d = p ? { ...p } : { name: "", emoji: catById(catId).emoji, cat: catId, unit: "pz", defQty: 1, days: 7, loc: "frigo", openDays: null, afterOpen: null, price: null, hidden: false };
+  if (!p && (catId === "casa-e-pulizia" || catId === "igiene-personale")){ d.loc = "utility"; d.days = null; }
+  const ui = makeUI();
+  const nameIn = el("input", { type: "text", value: d.name, placeholder: "Nome del prodotto", "aria-label": "Nome prodotto" });
+  nameIn.addEventListener("input", () => { d.name = nameIn.value; });
+  const showEm = { on: false };
+  const emGrid = emojiGrid(() => d.emoji, v => { d.emoji = v; showEm.on = false; }, ui);
+  const daysTxt = v => v == null ? "Nessuna" : v + (v === 1 ? " giorno" : " giorni");
+  const blocks = [
+    el("div", { class: "block" }, el("div", { class: "lbl" }, "Nome ed emoji"),
+      el("div", { class: "inline" },
+        el("button", { class: "em-big", type: "button", "aria-label": "Cambia emoji", onclick: () => { showEm.on = !showEm.on; ui.refresh(); } }, ui.text(() => d.emoji)),
+        el("div", { class: "grow" }, nameIn)),
+      ui.when(() => showEm.on, el("div", { style: "margin-top:10px" }, emGrid))),
+    el("div", { class: "block" }, el("div", { class: "lbl" }, "Categoria"),
+      ui.opts(categoriesAll().map(c => ({ v: c.id, label: c.emoji + " " + c.name })), () => d.cat, v => d.cat = v)),
+    el("div", { class: "block" }, el("div", { class: "lbl" }, "Unità e quantità di default"),
+      ui.opts(UNITS.map(u => ({ v: u, label: u })), () => d.unit, v => {
+        const c = convertQty(d.defQty, d.unit, v);
+        d.unit = v; d.defQty = c != null ? round2(c) : ((v === "g" || v === "ml") ? 250 : 1);
+      }),
+      el("div", { style: "height:8px" }),
+      ui.stepper(() => fmtQty(d.defQty, d.unit), () => { const st = stepOf(d.unit, d.defQty); d.defQty = Math.max(st, round2(d.defQty - st)); },
+        () => { d.defQty = round2(d.defQty + stepOf(d.unit, d.defQty)); })),
+    el("div", { class: "block" }, el("div", { class: "lbl" }, "Scadenza da quando entra in casa"),
+      el("div", { class: "inline" },
+        ui.stepper(() => daysTxt(d.days), () => { if (d.days != null) d.days = Math.max(0, d.days - 1); }, () => { d.days = d.days == null ? 1 : d.days + 1; }),
+      ),
+      el("div", { class: "opts", style: "margin-top:8px" },
+        ...[[3, "3 gg"], [7, "1 sett."], [30, "1 mese"], [90, "3 mesi"], [365, "1 anno"]].map(([v, t]) => el("button", { class: "opt", type: "button", onclick: () => { d.days = v; ui.refresh(); } }, t)),
+        el("button", { class: "opt", type: "button", onclick: () => { d.days = null; ui.refresh(); } }, "Nessuna"))),
+    el("div", { class: "block" }, el("div", { class: "lbl" }, "Posizione abituale"),
+      ui.opts(LOC_ORDER.map(l => ({ v: l, label: LOCS[l].label, icon: LOCS[l].icon })), () => d.loc, v => d.loc = v, "loc4")),
+    el("div", { class: "block" }, el("div", { class: "lbl" }, "Una volta aperto"),
+      el("div", { class: "inline" }, el("span", { class: "muted small" }, "Dura"),
+        ui.stepper(() => d.openDays == null ? "—" : daysTxt(d.openDays), () => { if (d.openDays != null) d.openDays = d.openDays <= 1 ? null : d.openDays - 1; }, () => { d.openDays = d.openDays == null ? 1 : d.openDays + 1; })),
+      el("div", { class: "muted small", style: "margin:10px 0 6px" }, "Dopo l’apertura va in"),
+      ui.opts([{ v: null, label: "Resta dov’è" }, ...LOC_ORDER.map(l => ({ v: l, label: LOCS[l].icon + " " + LOCS[l].label }))], () => d.afterOpen ?? null, v => d.afterOpen = v)),
+    el("div", { class: "block" }, el("div", { class: "lbl" }, "Prezzo indicativo (facoltativo)"),
+      el("div", { class: "inline" },
+        el("span", { class: "mini" },
+          el("button", { type: "button", onclick: () => { priceStep(() => d.price, v => d.price = v, -1); ui.refresh(); } }, "−"),
+          ui.priceInput(() => d.price, v => d.price = v),
+          el("button", { type: "button", onclick: () => { priceStep(() => d.price, v => d.price = v, 1); ui.refresh(); } }, "+")),
+        ui.text(() => "€ / " + priceUnit(d.unit), "span", { class: "muted" })))
+  ];
+  if (!isNew){
+    blocks.push(el("div", { class: "block" }, el("div", { class: "lbl" }, "Altro"),
+      el("div", { class: "opts" },
+        el("button", { class: "btn ghost", type: "button", onclick: () => {
+          closeSheet("sheet2"); safe(() => setDoc(doc(col("catalog"), p.id), { hidden: !p.hidden, v: 3 }, { merge: true }));
+          toast(p.hidden ? p.name + " di nuovo visibile" : p.name + " nascosto dai pulsanti");
+        } }, p.hidden ? "👁️ Mostra di nuovo" : "🙈 Nascondi dai pulsanti"),
+        !p.builtin ? el("button", { class: "btn danger", type: "button", onclick: () => {
+          closeSheet("sheet2"); safe(() => deleteDoc(doc(col("catalog"), p.id))); toast(p.name + " eliminato dal catalogo");
+        } }, "Elimina") : null)));
+  }
+  const save = el("button", { class: "btn", onclick: () => {
+    const name = d.name.trim(); if (!name){ nameIn.focus(); toast("Scrivi il nome del prodotto"); return; }
+    const id = p ? p.id : "c-" + slug(name);
+    if (!p && productsAll().some(x => x.id === id || norm(x.name) === norm(name))){ toast("Esiste già un prodotto con questo nome"); return; }
+    const data = { name, emoji: d.emoji, cat: d.cat, unit: d.unit, defQty: round2(d.defQty), days: d.days ?? null, loc: d.loc,
+      openDays: d.openDays ?? null, afterOpen: d.afterOpen ?? null, price: d.price ?? null, v: 3 };
+    if (!p) data.uses = 0;
+    closeSheet("sheet2");
+    safe(async () => { await setDoc(doc(col("catalog"), id), data, { merge: true }); toast(isNew ? name + " aggiunto al catalogo" : "Salvato"); });
+  } }, "Salva");
+  openSheet("sheet2", isNew ? "Nuovo prodotto" : p.name, el("div", null, blocks), [el("button", { class: "btn ghost", onclick: () => closeSheet("sheet2") }, "Annulla"), save]);
+  ui.refresh();
+}
+$("#catalogBtn").addEventListener("click", () => { $("#settingsDialog").close(); openCatalogManager(); });
 
 /* ---------- Varie ---------- */
 const net = () => { $("#offline").hidden = navigator.onLine; };

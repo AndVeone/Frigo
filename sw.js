@@ -3,7 +3,7 @@ importScripts("https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js
 importScripts("https://www.gstatic.com/firebasejs/10.12.2/firebase-messaging-compat.js");
 importScripts("./config.js");
 
-const VERSION = "frigo-v2";
+const VERSION = "frigo-v3";
 const SHELL = ["./", "./index.html", "./app.js", "./config.js", "./catalogo.js", "./manifest.webmanifest",
   "./icons/icon-192.png", "./icons/icon-512.png", "./icons/badge-96.png"];
 
